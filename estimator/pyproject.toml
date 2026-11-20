@@ -1,0 +1,44 @@
+[project]
+name = "iondude-estimator"
+version = "0.4"
+description = "Estimate Ion Torrent substitution and homopolymer error rates for iondude"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+dependencies = [
+    "pysam>=0.22",
+    "numpy>=1.24",
+    "matplotlib>=3.7",
+    "parse>=1.19",
+    "tqdm>=4.60",
+]
+
+[project.optional-dependencies]
+# only for the analysis scripts in scripts/
+scripts = [
+    "scipy>=1.10",
+    "sympy>=1.12",
+]
+
+[project.scripts]
+iondude-estimator = "estimator.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=7.0",
+    "ruff>=0.6",
+]
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["estimator"]
+
+[tool.ruff]
+line-length = 120
+extend-exclude = ["notebooks"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B"]

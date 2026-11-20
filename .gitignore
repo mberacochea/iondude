@@ -1,0 +1,70 @@
+# Mac Os
+.DS_Store
+
+*.o
+
+# VS
+# User-specific files
+*.suo
+*.user
+
+# Build results
+[Dd]ebug/
+[Dd]ebugPublic/
+[Rr]elease/
+[Rr]eleases/
+x64/
+x86/
+build/
+[Bb]in/
+[Oo]bj/
+
+# Visual C++ cache files
+*.aps
+*.ncb
+*.sdf
+*.cachefile
+
+# Python
+.env
+.venv/
+*.pyc
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# Source archives
+*.zip
+
+# PyCharm & CLion
+.idea
+
+### C ###
+# Object files
+*.o
+*.ko
+*.obj
+*.elf
+
+# Libraries
+*.lib
+*.a
+*.la
+*.lo
+
+# Shared objects (inc. Windows DLLs)
+*.dll
+*.so
+*.so.*
+*.dylib
+
+# Debug files
+*.dSYM/
+*.su
+
+# Agent output
+.mi/
+
+# Jupyter
+.ipynb_checkpoints/
