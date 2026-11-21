@@ -292,26 +292,12 @@ void load_homopolymers_matrix(dude_t *dude, FILE *file, char *header,
 }
 
 // create a new context helper
-context_helper_t *create_helper(int k) {
+context_helper_t *create_helper(void) {
   context_helper_t *helper =
       (context_helper_t *)malloc(sizeof(context_helper_t));
   if (helper == NULL) {
     error_exit();
   }
-
-  // context re-used on counting and denoise
-  helper->context = (char *)malloc(k + k + 2);
-
-  if (helper->context == NULL) {
-    error_exit();
-  }
-
-  helper->context_modified = (char *)malloc(k + k + 2);
-
-  if (helper->context_modified == NULL) {
-    error_exit();
-  }
-
   return helper;
 }
 
@@ -394,8 +380,6 @@ int get_index_for_matrix(int position_in_read, dude_t *dude) {
 void destroy_helper(context_helper_t *helper) {
   if (helper == NULL)
     return;
-  free(helper->context);
-  free(helper->context_modified);
   // free(helper->counter);
   // free(helper->counters_inv);
   free(helper);

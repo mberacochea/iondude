@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <string.h>
 
 #include "dude.h"
 #include "seq.h"
@@ -28,36 +29,14 @@ int get_quality_num(char qualchar, int qualtype, int pos) {
   return (qual_value - quality_constants[qualtype][Q_OFFSET]);
 }
 
-// encode a substitutions base (A -> 0)
-int encode_s_base(char base) {
-  switch (base) {
-  case 'A':
-    return 0;
-  case 'C':
-    return 1;
-  case 'G':
-    return 2;
-  case 'T':
-    return 3;
-  default:
-    return -1;
-  }
-}
+int8_t base_code[256];
 
-// decode a substitutions base (0 -> A)
-char decode_s_base(int index) {
-  switch (index) {
-  case 0:
-    return 'A';
-  case 1:
-    return 'C';
-  case 2:
-    return 'G';
-  case 3:
-    return 'T';
-  default:
-    return 'N';
-  }
+void init_base_codes(void) {
+  memset(base_code, -1, sizeof base_code);
+  base_code['A'] = 0;
+  base_code['C'] = 1;
+  base_code['G'] = 2;
+  base_code['T'] = 3;
 }
 
 // check that the sequence has only A, C, G or T
@@ -113,6 +92,15 @@ char encode_h_base(char base, int length) {
     break;
   }
   return (char)hom + length;
+}
+
+int hom_symbol(char encoded) {
+  // the codes of the bases are HOM_MATRIX_DIM apart: A_HOM 40, C_HOM 50, ...
+  int value = encoded - A_HOM;
+  if (value < 0 || value >= 4 * HOM_MATRIX_DIM) {
+    return -1;
+  }
+  return ((value / HOM_MATRIX_DIM) << 4) | (value % HOM_MATRIX_DIM);
 }
 
 // decode the RLE
