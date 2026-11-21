@@ -4,6 +4,12 @@
 #define SUBS_MATRIX_DIM 4
 #define HOM_MATRIX_DIM 10
 
+// max context lengths: the context key must fit in 64 bits
+// substitutions: 2k bases of 2 bits
+#define MAX_K 16
+// homopolymers: 2i runs of 6 bits and the base of the centre run (2 bits)
+#define MAX_I 5
+
 // QUAL mode: one matrix per Phred score from 0 to MAX_QUAL - 1
 // bases with a higher score are not denoised
 #define MAX_QUAL 50
@@ -79,10 +85,6 @@ typedef struct {
 
 // context helper struct
 typedef struct {
-  // context
-  char *context;
-  // context modified with other base in the i position
-  char *context_modified;
   // auxiliary counters
   float *counter;
   float *counters_inv;
@@ -105,7 +107,7 @@ dude_t *create_dude_params(int k, int h, int read_len, int range, char *mode);
 
 int get_matrix_slot(dude_t *dude, char *header);
 
-context_helper_t *create_helper(int k);
+context_helper_t *create_helper(void);
 
 void destroy_helper(context_helper_t *helper);
 

@@ -1,4 +1,5 @@
 #include <float.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20,12 +21,31 @@
 #define DEFAULT_R 20
 #define DEFAULT_C 0
 
-// Hash table init
-// name part of init must be unique for the key, value types.
-// in this instance 34 is arbitrary symbolic name for a hashtable
-// that contains string keys and int values.
-const int khStrInt = 34;
-KHASH_MAP_INIT_STR(khStrInt, int)
+// context table: the key is the context without the centre symbol, the value
+// is the index of the count vector of the key in counts
+KHASH_MAP_INIT_INT64(ctx, int)
+
+typedef struct {
+  khash_t(ctx) * index;
+  // dim counts for each key: how many times each centre symbol was seen
+  int *counts;
+  int dim;
+  // count vectors used and allocated
+  int n, m;
+} ctx_table_t;
+
+// rolling window of the 2k + 1 symbols around the centre
+// substitutions: 2-bit base codes, homopolymers: 6-bit symbols (hom_symbol)
+typedef struct {
+  int k;
+  int bits;
+  uint64_t side_mask;
+  // the k symbols on each side of the centre, the oldest in the high bits
+  uint64_t left, right;
+  int centre;
+  // symbols since the start or since the last base that is not A, C, G or T
+  int filled;
+} window_t;
 
 // kseq init
 __KS_GETC(gzread, BUFFER_SIZE)
@@ -47,33 +67,40 @@ void print_help();
 void print_version();
 
 // dude
-void count_contexts(dude_t *dude, context_helper_t *helper, char *seq,
-                    khash_t(khStrInt) * table);
+ctx_table_t *create_table(int dim);
 
-int get_context(dude_t *dude, context_helper_t *helper, int position,
-                char *seq);
+int *get_counts(ctx_table_t *table, uint64_t key, int add);
 
-int load_modified_context(dude_t *dude, context_helper_t *helper, char base);
+void destroy_table(ctx_table_t *table);
 
-char get_min_base(dude_t *dude, context_helper_t *helper,
-                  khash_t(khStrInt) * table, char base, int position,
-                  int quality);
+void window_init(window_t *w, dude_t *dude);
+
+int window_push(window_t *w, int symbol);
+
+uint64_t window_key(window_t *w);
+
+int window_slot(window_t *w);
+
+int get_symbol(dude_t *dude, char c);
+
+void count_contexts(dude_t *dude, const char *seq, ctx_table_t *table);
+
+char get_min_base(dude_t *dude, context_helper_t *helper, ctx_table_t *table,
+                  window_t *w, int position, int quality);
 
 kseq_t *denoise_seq(dude_t *dude, context_helper_t *helper, kseq_t *seq,
-                    khash_t(khStrInt) * table);
+                    ctx_table_t *table);
 
 // utilities
 void write_seq(FILE *file, kseq_t *sequence);
 
 void write_denoised_seq(FILE *file, kseq_t *denoised, kseq_t *sequence);
 
-void deallocate_table(khash_t(khStrInt) * table);
-
 FILE *open_output(char *path);
 
 gzFile open_reads(char *path);
 
-void run_tests();
+int run_tests();
 
 // ================================
 //
@@ -84,6 +111,8 @@ int main(int argc, char *argv[]) {
 
   int k = DEFAULT_K, i = DEFAULT_I, l = DEFAULT_L, r = DEFAULT_R, c = DEFAULT_C;
   char *reads = NULL, *matrix = NULL, *output = NULL, *type = "read";
+
+  init_base_codes();
 
   int p;
   while ((p = getopt(argc, argv, "q:m:k:i:o:c:l:r:M:tvh")) != -1)
@@ -127,8 +156,7 @@ int main(int argc, char *argv[]) {
       }
       break;
     case 't':
-      run_tests();
-      return 0;
+      return run_tests() ? EXIT_FAILURE : 0;
     case 'v':
       print_version();
       return 0;
@@ -153,6 +181,15 @@ int main(int argc, char *argv[]) {
   if (k < 1 || i < 1 || l < 1 || r < 1) {
     fprintf(stderr,
             "Invalid arguments: -k, -i, -l and -r must be greater than 0.\n");
+    print_help();
+    exit(EXIT_FAILURE);
+  }
+
+  if (k > MAX_K || i > MAX_I) {
+    fprintf(stderr,
+            "Invalid arguments: -k must be %d or less and -i must be %d or "
+            "less.\n",
+            MAX_K, MAX_I);
     print_help();
     exit(EXIT_FAILURE);
   }
@@ -189,7 +226,7 @@ int main(int argc, char *argv[]) {
 
   load_matrices(matrix, dude);
 
-  context_helper_t *helper = create_helper(k);
+  context_helper_t *helper = create_helper();
 
   char *subs_output_name = append_str(output, "_subs.fastq");
   char *indels_output_name = append_str(output, "_hom.fastq");
@@ -296,7 +333,7 @@ void denoise_substitutions(dude_t *dude, context_helper_t *helper, char *output,
   dude->mode = SUBSTITUTIONS;
 
   // allocate a new hash table
-  khash_t(khStrInt) *table_subs = kh_init(khStrInt);
+  ctx_table_t *table_subs = create_table(SUBS_MATRIX_DIM);
 
   // set auxiliary counters
   helper->counter = (float *)calloc(SUBS_MATRIX_DIM, sizeof(float));
@@ -317,8 +354,9 @@ void denoise_substitutions(dude_t *dude, context_helper_t *helper, char *output,
   int l;
 
   // count the contexts for substitutions
+  // windows with a base that is not A, C, G or T are not counted
   while ((l = kseq_read(seq)) >= 0) {
-    count_contexts(dude, helper, seq->seq.s, table_subs);
+    count_contexts(dude, seq->seq.s, table_subs);
   }
 
   // rewind the file and start the denoise process
@@ -352,7 +390,7 @@ void denoise_substitutions(dude_t *dude, context_helper_t *helper, char *output,
   fclose(subs_output);
 
   // clean up the table
-  deallocate_table(table_subs);
+  destroy_table(table_subs);
 
   // close the original file
   kseq_destroy(seq);
@@ -371,7 +409,7 @@ void denoise_homopolymers(dude_t *dude, context_helper_t *helper, char *output,
 
   dude->mode = HOMOPOLYMERS;
 
-  khash_t(khStrInt) *table_hom = kh_init(khStrInt);
+  ctx_table_t *table_hom = create_table(HOM_MATRIX_DIM);
 
   gzFile fp = open_reads(reads);
   kseq_t *seq = kseq_init(fp);
@@ -391,7 +429,7 @@ void denoise_homopolymers(dude_t *dude, context_helper_t *helper, char *output,
       // the sequence is encoded [homopolymers are encoded]
       kseq_t *encoded = encode_homopolymers_seq(seq);
 
-      count_contexts(dude, helper, encoded->seq.s, table_hom);
+      count_contexts(dude, encoded->seq.s, table_hom);
 
       kseq_free(encoded);
     }
@@ -444,97 +482,140 @@ void denoise_homopolymers(dude_t *dude, context_helper_t *helper, char *output,
   gzclose(fp);
 
   // clean up the table
-  deallocate_table(table_hom);
+  destroy_table(table_hom);
 
   // reset helper
   free(helper->counter);
   free(helper->counters_inv);
 }
 
-void count_contexts(dude_t *dude, context_helper_t *helper, char *seq,
-                    khash_t(khStrInt) * table) {
-  // This method will go over each base on the provided Sequence
-  // and will encode the context and increase the counter for the context on the
-  // table
-  int len = strlen(seq), i = 0;
-
-  khint_t hash_value;
-
-  int k = (dude->mode == SUBSTITUTIONS) ? dude->k : dude->h;
-
-  // sequences shorter than the provided K value are ignored
-  if (len < k * 2) {
-    return;
+// create an empty context table, dim counts for each key
+ctx_table_t *create_table(int dim) {
+  ctx_table_t *table = (ctx_table_t *)calloc(1, sizeof(ctx_table_t));
+  if (table == NULL) {
+    error_exit();
   }
-
-  for (i = k; i < len - k; i++) {
-
-    int ctx_get = get_context(dude, helper, i, seq);
-
-    if (ctx_get == 0) {
-      fprintf(stderr, "[context counts] sequence '%s' and position '%d' failed",
-              seq, i);
-      continue;
-    }
-
-    // query the hash table
-    hash_value = kh_get(khStrInt, table, helper->context);
-
-    if (hash_value != kh_end(table)) {
-      int counter = kh_val(table, hash_value);
-      kh_value(table, hash_value) = counter + 1;
-    } else {
-      int ret;
-      hash_value = kh_put(khStrInt, table, strdup(helper->context), &ret);
-      if (ret) {
-        kh_value(table, hash_value) = 1;
-      }
-    }
-  }
+  table->index = kh_init(ctx);
+  table->dim = dim;
+  return table;
 }
 
-// change the base on a
-int load_modified_context(dude_t *dude, context_helper_t *helper, char base) {
-  // clean and change
-  int k = (dude->mode == SUBSTITUTIONS) ? dude->k : dude->h;
-
-  int i = 0;
-  for (; i <= k * 2; i++) {
-    helper->context_modified[i] = helper->context[i];
+// get the count vector of a key
+// if the key is not in the table: add it when add is 1, else return NULL
+// the pointer is valid until the next call that adds a key
+int *get_counts(ctx_table_t *table, uint64_t key, int add) {
+  khint_t it = kh_get(ctx, table->index, key);
+  if (it != kh_end(table->index)) {
+    return table->counts + (size_t)kh_val(table->index, it) * table->dim;
   }
-  helper->context_modified[i] = '\0';
-  helper->context_modified[k] = base;
-  return 1;
+  if (!add) {
+    return NULL;
+  }
+
+  // grow the count vectors array
+  if (table->n == table->m) {
+    table->m = table->m ? table->m * 2 : 1024;
+    int *grown = (int *)realloc(table->counts,
+                                (size_t)table->m * table->dim * sizeof(int));
+    if (grown == NULL) {
+      error_exit();
+    }
+    table->counts = grown;
+  }
+
+  int ret;
+  it = kh_put(ctx, table->index, key, &ret);
+  if (ret < 0) {
+    error_exit();
+  }
+  kh_val(table->index, it) = table->n;
+
+  int *counts = table->counts + (size_t)table->n * table->dim;
+  memset(counts, 0, table->dim * sizeof(int));
+  table->n++;
+  return counts;
 }
 
-// get the context of a sequence from a starting point
-int get_context(dude_t *dude, context_helper_t *helper, int position,
-                char *seq) {
+// free the memory of a context table
+void destroy_table(ctx_table_t *table) {
+  kh_destroy(ctx, table->index);
+  free(table->counts);
+  free(table);
+}
 
-  // k [Base] k + 1
-  int k = (dude->mode == SUBSTITUTIONS) ? dude->k : dude->h;
+// start an empty window for the current mode
+void window_init(window_t *w, dude_t *dude) {
+  int subs = (dude->mode == SUBSTITUTIONS);
+  w->k = subs ? dude->k : dude->h;
+  w->bits = subs ? 2 : 6;
+  // one side has at most 32 bits (MAX_K and MAX_I)
+  w->side_mask = (1ULL << (w->bits * w->k)) - 1;
+  w->left = 0;
+  w->right = 0;
+  w->centre = 0;
+  w->filled = 0;
+}
 
-  int start = position - k, end = position + k + 1;
-
-  int new_ctx_len = end - start;
-
-  if (k * 2 > new_ctx_len) {
+// shift the next symbol into the right side of the window
+// the oldest symbol of the right side becomes the centre, and the old centre
+// goes into the left side
+// a symbol -1 (not A, C, G or T) empties the window
+// returns 1 when the window has 2k + 1 symbols
+int window_push(window_t *w, int symbol) {
+  if (symbol < 0) {
+    w->filled = 0;
     return 0;
   }
+  int b = w->bits, k = w->k;
+  w->left = ((w->left << b) | (uint64_t)w->centre) & w->side_mask;
+  w->centre = (int)(w->right >> (b * (k - 1))) & ((1 << b) - 1);
+  w->right = ((w->right << b) | (uint64_t)symbol) & w->side_mask;
+  w->filled++;
+  return w->filled > 2 * k;
+}
 
-  int n = 0, j = 0;
-  for (n = 0, j = start; j < end; n++, j++) {
-    helper->context[n] = seq[j];
+// the key is the left and the right sides, without the centre
+// homopolymers: the base of the centre run is also in the key, because the
+// denoise only changes the run length
+uint64_t window_key(window_t *w) {
+  uint64_t key = (w->left << (w->bits * w->k)) | w->right;
+  if (w->bits == 2) {
+    return key;
   }
+  return (key << 2) | (uint64_t)(w->centre >> 4);
+}
 
-  helper->context[n] = '\0';
+// the index of the centre in the count vector: the base code (substitutions)
+// or the run length - 1 (homopolymers)
+int window_slot(window_t *w) {
+  return (w->bits == 2) ? w->centre : w->centre & 15;
+}
 
-  return 1;
+// the symbol of a sequence char for the current mode, -1 if not valid
+int get_symbol(dude_t *dude, char c) {
+  if (dude->mode == SUBSTITUTIONS) {
+    return base_code[(unsigned char)c];
+  }
+  return hom_symbol(c);
+}
+
+void count_contexts(dude_t *dude, const char *seq, ctx_table_t *table) {
+  // go over each base of the sequence and increase the counter of the centre
+  // symbol for the context. Windows with a base that is not A, C, G or T are
+  // not counted
+  window_t w;
+  window_init(&w, dude);
+
+  for (int i = 0; seq[i] != '\0'; i++) {
+    if (window_push(&w, get_symbol(dude, seq[i]))) {
+      get_counts(table, window_key(&w), 1)[window_slot(&w)]++;
+    }
+  }
 }
 
 // Denoise every base on the sequence
 kseq_t *denoise_seq(dude_t *dude, context_helper_t *helper, kseq_t *seq,
-                    khash_t(khStrInt) * table) {
+                    ctx_table_t *table) {
 
   int k = (dude->mode == SUBSTITUTIONS) ? dude->k : dude->h;
 
@@ -545,91 +626,48 @@ kseq_t *denoise_seq(dude_t *dude, context_helper_t *helper, kseq_t *seq,
 
   kseq_t *ret = kseq_dup(seq);
 
+  window_t w;
+  window_init(&w, dude);
+
   // for every base on the sequence, obtain the base that minimize
-  for (int i = k; i < seq->seq.l - k; i++) {
+  for (int i = 0; i < seq->seq.l; i++) {
+    if (!window_push(&w, get_symbol(dude, seq->seq.s[i]))) {
+      continue;
+    }
+    int centre = i - k;
+
     // TODO: - optional threshold
     //       - configurable fastq quality type
     // 1 is PHRED is used for iontorrent
-    int quality = get_quality_num(seq->qual.s[i], 1, i);
+    int quality = get_quality_num(seq->qual.s[centre], 1, centre);
 
     // extreme high quality bases aren't denoised
     if (quality >= MAX_QUAL) {
-      ret->seq.s[i] = seq->seq.s[i];
       continue;
     }
 
-    // get the context for this base
-    if (get_context(dude, helper, i, seq->seq.s)) {
-      // save the base that minimize
-      ret->seq.s[i] =
-          get_min_base(dude, helper, table, seq->seq.s[i], i, quality);
-    } else {
-      ret->seq.s[i] = seq->seq.s[i];
-      fprintf(stderr,
-              KRED "[denoise seq] context for seq '%s' and position '%d'",
-              seq->name.s, i);
-    }
+    // save the base that minimize
+    ret->seq.s[centre] = get_min_base(dude, helper, table, &w, centre, quality);
   }
 
   return ret;
 }
 
 // obtain the base that minimize
-char get_min_base(dude_t *dude, context_helper_t *helper,
-                  khash_t(khStrInt) * table, char base, int position,
-                  int quality) {
+char get_min_base(dude_t *dude, context_helper_t *helper, ctx_table_t *table,
+                  window_t *w, int position, int quality) {
 
-  // build the occurrences col vector
   int subs = (dude->mode == SUBSTITUTIONS);
-  int upper_bound = (subs) ? SUBS_MATRIX_DIM : HOM_MATRIX_DIM;
+  int upper_bound = table->dim;
 
-  khint_t hash_value;
-
-  // get the start and finish points
-  int offset = 0;
-  if (!subs) {
-    if (base >= T_HOM) {
-      offset = T_HOM;
-    } else if (base >= G_HOM) {
-      offset = G_HOM;
-    } else if (base >= C_HOM) {
-      offset = C_HOM;
-    } else if (base >= A_HOM) {
-      offset = A_HOM;
-    }
-  }
-
-  // build the column vector with the context counts for each possible base
-  int cwb = 0;
+  // the column vector with the context counts for each possible base
+  int *counts = get_counts(table, window_key(w), 0);
   for (int i = 0; i < upper_bound; i++) {
-    if (subs) {
-      cwb = load_modified_context(dude, helper, decode_s_base(i));
-    } else {
-      cwb = load_modified_context(dude, helper, (char)(offset + i));
-    }
-
-    int val = 0;
-    if (cwb == 1) {
-      // get counter value
-      hash_value = kh_get(khStrInt, table, helper->context_modified);
-      if (hash_value != kh_end(table)) {
-        val = kh_val(table, hash_value);
-      }
-    }
-    helper->counter[i] = val;
+    helper->counter[i] = counts ? counts[i] : 0;
   }
 
-  // find the base that minimize
-  float min = FLT_MAX;
-  int base_that_minimize = 0;
-  int encoded_base = 0;
-  if (subs) {
-    // observed base
-    encoded_base = encode_s_base(base);
-  } else {
-    // homopolymer length
-    encoded_base = base - offset;
-  }
+  // observed base, or homopolymer length - 1
+  int encoded_base = window_slot(w);
 
   // The matrix index depends on the running type
   int position_index = 0;
@@ -653,7 +691,9 @@ char get_min_base(dude_t *dude, context_helper_t *helper,
     helper->counters_inv[x] = value;
   }
 
-  // argmin
+  // find the base that minimize
+  float min = FLT_MAX;
+  int base_that_minimize = 0;
   for (int argmin_symbol = 0; argmin_symbol < upper_bound; argmin_symbol++) {
 
     // Has the cached product wise values of the channel transition matrix and
@@ -672,19 +712,17 @@ char get_min_base(dude_t *dude, context_helper_t *helper,
       }
     }
 
-    // printf("\n%.6f", innerMin);
-
     if (innerMin < min) {
-      base_that_minimize = (subs) ? argmin_symbol : offset + argmin_symbol;
+      base_that_minimize = argmin_symbol;
       min = innerMin;
     }
   }
 
   if (subs) {
-    return decode_s_base(base_that_minimize);
-  } else {
-    return base_that_minimize;
+    return "ACGT"[base_that_minimize];
   }
+  // homopolymers: the same base with the new run length
+  return encode_h_base("ACGT"[w->centre >> 4], base_that_minimize);
 }
 
 // open the output file, exit on error
@@ -749,22 +787,11 @@ void write_denoised_seq(FILE *file, kseq_t *denoised, kseq_t *sequence) {
   fprintf(file, "%s\n", denoised->qual.s);
 }
 
-// free the memory of a hash table
-void deallocate_table(khash_t(khStrInt) * table) {
-  // clean up the table
-  khint_t kv;
-  for (kv = kh_begin(table); kv != kh_end(table); ++kv) {
-    if (kh_exist(table, kv)) {
-      free((char *)kh_key(table, kv));
-    }
-  }
-  kh_destroy(khStrInt, table);
-}
-
 // ================================================ //
 //         Encode/Decode homopolymers RLE Tests    //
 // ============================================== //
-void run_tests() {
+// returns the number of failed reads
+int test_rle() {
 
   gzFile fp;
   kseq_t *seq;
@@ -803,17 +830,147 @@ void run_tests() {
   }
 
   if (f == 0 && s == i) {
-    printf("every test passed, nice\n");
+    printf("RLE tests passed\n");
   }
 
   if (f != 0 && s != i) {
-    fprintf(stderr, "some test failed\n");
+    fprintf(stderr, "some RLE test failed\n");
   }
 
   if (f != 0 && s == 0) {
-    fprintf(stderr, "every test failed");
+    fprintf(stderr, "every RLE test failed\n");
   }
 
   kseq_destroy(seq);
   gzclose(fp);
+  return f;
+}
+
+// ================================================ //
+//              Context encoding Tests              //
+// ============================================== //
+// compare the keys and slots of all the full windows of a read with the
+// expected values. HOMOPOLYMERS: the read is run-length encoded first
+// returns 1 if the test failed
+int test_keys(const char *name, denoise_m mode, int k, char *read, int n,
+              const uint64_t *keys, const int *slots) {
+  dude_t dude;
+  memset(&dude, 0, sizeof dude);
+  dude.mode = mode;
+  dude.k = k;
+  dude.h = k;
+
+  char *seq = read;
+  kseq_t *encoded = NULL;
+  if (mode == HOMOPOLYMERS) {
+    // the quality values are not used, the read is a valid placeholder
+    kseq_t raw;
+    memset(&raw, 0, sizeof raw);
+    raw.seq.s = read;
+    raw.seq.l = strlen(read);
+    raw.qual = raw.seq;
+    encoded = encode_homopolymers_seq(&raw);
+    seq = encoded->seq.s;
+  }
+
+  window_t w;
+  window_init(&w, &dude);
+
+  int found = 0, failed = 0;
+  for (int i = 0; seq[i] != '\0'; i++) {
+    if (!window_push(&w, get_symbol(&dude, seq[i]))) {
+      continue;
+    }
+    if (found >= n || window_key(&w) != keys[found] ||
+        window_slot(&w) != slots[found]) {
+      failed = 1;
+    }
+    found++;
+  }
+
+  if (failed || found != n) {
+    fprintf(stderr, "test '%s' failed\n", name);
+    failed = 1;
+  }
+  kseq_free(encoded);
+  return failed;
+}
+
+// count the contexts of 3 reads and check the count vectors
+// returns 1 if the test failed
+int test_counts() {
+  dude_t dude;
+  memset(&dude, 0, sizeof dude);
+  dude.mode = SUBSTITUTIONS;
+  dude.k = 2;
+
+  ctx_table_t *table = create_table(SUBS_MATRIX_DIM);
+  count_contexts(&dude, "ACGTTGCA", table);
+  count_contexts(&dude, "ACTTTGCA", table);
+  // no full window without the N
+  count_contexts(&dude, "ACNTT", table);
+
+  // AC_TT (31) has G once and T once, TT_CA (244) has G twice
+  int *c31 = get_counts(table, 31, 0);
+  int *c244 = get_counts(table, 244, 0);
+  int failed = table->n != 6 || get_counts(table, 0, 0) != NULL ||
+               c31 == NULL || c31[0] != 0 || c31[1] != 0 || c31[2] != 1 ||
+               c31[3] != 1 || c244 == NULL || c244[0] != 0 || c244[1] != 0 ||
+               c244[2] != 2 || c244[3] != 0;
+
+  if (failed) {
+    fprintf(stderr, "test 'context counts' failed\n");
+  }
+  destroy_table(table);
+  return failed;
+}
+
+// returns the number of failed tests
+int test_encoding() {
+  int f = 0;
+
+  // the examples of the plan (encoding_demo.c)
+  f += test_keys("substitutions k 2", SUBSTITUTIONS, 2, "ACGTTGCA", 4,
+                 (uint64_t[]){31, 110, 185, 244}, (int[]){2, 3, 3, 2});
+  // runs A3 C1 G2 T1: centre C1 (key 645, length 1) and G2 (key 4290, length 2)
+  f += test_keys("homopolymers i 1", HOMOPOLYMERS, 1, "AAACGGT", 2,
+                 (uint64_t[]){645, 4290}, (int[]){0, 1});
+
+  // k 16: the key has 64 bits, the first base (C) is in the 2 high bits
+  f += test_keys("substitutions k 16", SUBSTITUTIONS, 16,
+                 "CAAAAAAAAAAAAAAAGAAAAAAAAAAAAAAAT", 1,
+                 (uint64_t[]){(1ULL << 62) | 3}, (int[]){2});
+  f += test_keys("substitutions k 16 all T", SUBSTITUTIONS, 16,
+                 "TTTTTTTTTTTTTTTTGTTTTTTTTTTTTTTTT", 1,
+                 (uint64_t[]){UINT64_MAX}, (int[]){2});
+  // i 5: runs T10 G10 T10 G10 T10 [C3] T10 G10 T10 G10 T10, the key has 62 bits
+  f += test_keys("homopolymers i 5", HOMOPOLYMERS, 5,
+                 "TTTTTTTTTTGGGGGGGGGGTTTTTTTTTTGGGGGGGGGGTTTTTTTTTT"
+                 "CCC"
+                 "TTTTTTTTTTGGGGGGGGGGTTTTTTTTTTGGGGGGGGGGTTTTTTTTTT",
+                 1, (uint64_t[]){4154459029623433701ULL}, (int[]){2});
+
+  // bases that are not A, C, G or T empty the window
+  f += test_keys("N before", SUBSTITUTIONS, 2, "ACNACGTTGCA", 4,
+                 (uint64_t[]){31, 110, 185, 244}, (int[]){2, 3, 3, 2});
+  f += test_keys("N inside", SUBSTITUTIONS, 2, "ACGTTNGCA", 1,
+                 (uint64_t[]){31}, (int[]){2});
+  f += test_keys("lowercase", SUBSTITUTIONS, 2, "ACGTtGCA", 0, NULL, NULL);
+  f += test_keys("short read", SUBSTITUTIONS, 2, "ACGT", 0, NULL, NULL);
+
+  f += test_counts();
+
+  if (f == 0) {
+    printf("context encoding tests passed\n");
+  }
+  return f;
+}
+
+// returns the number of failed tests
+int run_tests() {
+  int f = test_rle() + test_encoding();
+  if (f == 0) {
+    printf("every test passed, nice\n");
+  }
+  return f;
 }

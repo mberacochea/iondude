@@ -2,6 +2,7 @@
 #define SEQ
 
 #include "../lib/klib/kseq.h"
+#include <stdint.h>
 #include <zlib.h>
 
 #define BUFFER_SIZE 409
@@ -43,14 +44,21 @@ int get_quality_num(char qualchar, int qualtype, int pos);
 // ================================ //
 //      Code and Decode related
 // ================================ //
-int encode_s_base(char base);
+// 2-bit code of a base: A 0, C 1, G 2, T 3, -1 for any other byte
+// decode with "ACGT"[code]
+extern int8_t base_code[256];
 
-char decode_s_base(int index);
+// fill base_code, call it once at the start
+void init_base_codes(void);
 
 int is_acgt_seq(const char *seq);
 
 // length is the homopolymer length - 1 (0 to HOM_MATRIX_DIM - 1)
 char encode_h_base(char base, int length);
+
+// 6-bit symbol of an encoded homopolymer: the base code (2 bits) and the
+// length - 1 (4 bits). -1 for any other value
+int hom_symbol(char encoded);
 
 kseq_t *encode_homopolymers_seq(kseq_t *seq);
 
