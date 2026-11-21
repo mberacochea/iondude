@@ -82,6 +82,10 @@ uv run iondude-estimator mapped.sam -l 200 -r 20 -o matrices.json
 
 See [estimator/README.md](estimator/README.md) for the details of the estimation.
 
+## AI Usage
+
+I've used Claude to help with the coding.
+
 ## License
 
 Apache License 2.0, see [LICENSE](LICENSE).
