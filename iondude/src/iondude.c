@@ -1,4 +1,5 @@
 #include <float.h>
+#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -17,8 +18,6 @@
 // default values of the options
 #define DEFAULT_K 5
 #define DEFAULT_I 2
-#define DEFAULT_L 200
-#define DEFAULT_R 20
 #define DEFAULT_C 0
 
 // context table: the key is the context without the centre symbol, the value
@@ -109,13 +108,13 @@ int run_tests();
 // ================================
 int main(int argc, char *argv[]) {
 
-  int k = DEFAULT_K, i = DEFAULT_I, l = DEFAULT_L, r = DEFAULT_R, c = DEFAULT_C;
-  char *reads = NULL, *matrix = NULL, *output = NULL, *type = "read";
+  int k = DEFAULT_K, i = DEFAULT_I, c = DEFAULT_C;
+  char *reads = NULL, *matrix = NULL, *output = NULL;
 
   init_base_codes();
 
   int p;
-  while ((p = getopt(argc, argv, "q:m:k:i:o:c:l:r:M:tvh")) != -1)
+  while ((p = getopt(argc, argv, "q:m:k:i:o:c:tvh")) != -1)
     switch (p) {
     case 'q':
       reads = optarg;
@@ -132,25 +131,11 @@ int main(int argc, char *argv[]) {
     case 'o':
       output = optarg;
       break;
-    case 'l':
-      l = atoi(optarg);
-      break;
-    case 'r':
-      r = atoi(optarg);
-      break;
     case 'c':
       c = atoi(optarg);
       // Mode { 0 - subs, 1 hom, 2 both {SH}, 3 {HS} };
       if (c > 3 || c < 0) {
         fprintf(stderr, "Invalid correction type: -c must be 0, 1, 2 or 3.\n");
-        print_help();
-        exit(EXIT_FAILURE);
-      }
-      break;
-    case 'M':
-      type = optarg;
-      if (strncmp(type, "qual", 5) != 0 && strncmp(type, "read", 5) != 0) {
-        fprintf(stderr, "Invalid matrix type: -M must be read or qual.\n");
         print_help();
         exit(EXIT_FAILURE);
       }
@@ -178,9 +163,8 @@ int main(int argc, char *argv[]) {
     exit(EXIT_FAILURE);
   }
 
-  if (k < 1 || i < 1 || l < 1 || r < 1) {
-    fprintf(stderr,
-            "Invalid arguments: -k, -i, -l and -r must be greater than 0.\n");
+  if (k < 1 || i < 1) {
+    fprintf(stderr, "Invalid arguments: -k and -i must be greater than 0.\n");
     print_help();
     exit(EXIT_FAILURE);
   }
@@ -205,24 +189,32 @@ int main(int argc, char *argv[]) {
     mode_str[1] = 'S';
   }
 
+  // the slots of the matrices come from the file
+  matrix_meta_t meta = read_matrix_meta(matrix);
+
   print_version();
   printf("\nArguments\n");
   printf("# reads                 : %s\n", reads);
   printf("# channel matrix        : %s\n", matrix);
   printf("# context length subs   : %d\n", k);
   printf("# context length indels : %d\n", i);
-  printf("# max read length       : %d\n", l);
-  printf("# matrix ranges size    : %d\n", r);
   printf("# correction type       : %s\n", mode_str);
-  printf("# denoise type          : %s\n", type);
+
+  printf("\nMatrices\n");
+  printf("# made by               : %s %s, %s\n", meta.tool, meta.version,
+         meta.date);
+  printf("# estimated from        : %s\n", meta.input);
+  printf("# denoise type          : %s\n",
+         meta.type == QUAL ? "quality" : "position");
+  printf("# matrix ranges size    : %d\n", meta.range);
+  printf("# max length            : %d\n", meta.max_length);
 
   printf("\nOutput\n");
   printf("# denoise substitutions : %s_subs.fastq\n", output);
   printf("# denoise indels        : %s_hom.fastq\n", output);
 
   // create the DUDE params and context helper
-  // TODO-QUAL
-  dude_t *dude = create_dude_params(k, i, l, r, type);
+  dude_t *dude = create_dude_params(k, i, meta);
 
   load_matrices(matrix, dude);
 
@@ -271,8 +263,8 @@ int main(int argc, char *argv[]) {
     break;
   }
 
-  // TODO clean up dude
   destroy_helper(helper);
+  destroy_dude_params(dude);
 
   // ========== Log file ============== //
   // fclose(LOG_FILE);
@@ -285,11 +277,11 @@ int main(int argc, char *argv[]) {
 void print_help() {
   print_version();
   printf("\nDUDE denoiser for Ion Torrent reads.\n\n");
-  printf("Usage: iondude -q reads.fastq -m matrices.txt -o denoised "
+  printf("Usage: iondude -q reads.fastq -m matrices.json -o denoised "
          "[options]\n\n");
   printf("Required:\n");
   printf("  -q <file>    reads, FASTQ (plain or gzip)\n");
-  printf("  -m <file>    channel matrices made by the estimator\n");
+  printf("  -m <file>    channel matrices made by the estimator (JSON)\n");
   printf("  -o <prefix>  output prefix: <prefix>_subs.fastq and "
          "<prefix>_hom.fastq\n\n");
   printf("Options:\n");
@@ -300,20 +292,12 @@ void print_help() {
       "  -i <int>     context length for homopolymers                   [%d]\n",
       DEFAULT_I);
   printf(
-      "  -l <int>     max read length, as used by the estimator         [%d]\n",
-      DEFAULT_L);
-  printf(
-      "  -r <int>     width of the position ranges, as in the estimator [%d]\n",
-      DEFAULT_R);
-  printf(
       "  -c <int>     correction type                                   [%d]\n",
       DEFAULT_C);
   printf("                 0  substitutions only\n");
   printf("                 1  homopolymers only\n");
   printf("                 2  substitutions, then homopolymers\n");
   printf("                 3  homopolymers, then substitutions\n");
-  printf("  -M <str>     matrices by read position (read) or by base quality "
-         "(qual) [read]\n");
   printf("  -t           run the self-tests\n");
   printf("  -v           print the version\n");
   printf("  -h           print this help\n");
@@ -642,7 +626,8 @@ kseq_t *denoise_seq(dude_t *dude, context_helper_t *helper, kseq_t *seq,
     int quality = get_quality_num(seq->qual.s[centre], 1, centre);
 
     // extreme high quality bases aren't denoised
-    if (quality >= MAX_QUAL) {
+    // QUAL type: the matrices have one slot for each score below dude->slots
+    if (quality >= (dude->type == QUAL ? dude->slots : MAX_QUAL)) {
       continue;
     }
 
@@ -966,9 +951,160 @@ int test_encoding() {
   return f;
 }
 
+// ================================================ //
+//                 Matrices file Tests              //
+// ============================================== //
+#define TEST_MATRICES "unit_test/matrices.json"
+
+static cJSON *test_slot(cJSON *root, const char *kind, int z) {
+  cJSON *section = cJSON_GetObjectItemCaseSensitive(root, kind);
+  return cJSON_GetArrayItem(cJSON_GetObjectItemCaseSensitive(section, "slots"),
+                            z);
+}
+
+static void set_format_version(cJSON *root) {
+  cJSON_SetNumberValue(cJSON_GetObjectItemCaseSensitive(root, "format_version"),
+                       2);
+}
+
+static void set_slot_type(cJSON *root) {
+  cJSON_SetValuestring(cJSON_GetObjectItemCaseSensitive(root, "slot_type"),
+                       "read");
+}
+
+static void remove_source_date(cJSON *root) {
+  cJSON_DeleteItemFromObjectCaseSensitive(
+      cJSON_GetObjectItemCaseSensitive(root, "source"), "date");
+}
+
+static void remove_last_slot(cJSON *root) {
+  cJSON *section = cJSON_GetObjectItemCaseSensitive(root, "homopolymers");
+  cJSON_DeleteItemFromArray(cJSON_GetObjectItemCaseSensitive(section, "slots"),
+                            9);
+}
+
+static void set_slot_gap(cJSON *root) {
+  cJSON_SetNumberValue(
+      cJSON_GetObjectItemCaseSensitive(test_slot(root, "substitutions", 1),
+                                       "min"),
+      40);
+}
+
+static void remove_channel_row(cJSON *root) {
+  cJSON_DeleteItemFromArray(
+      cJSON_GetObjectItemCaseSensitive(test_slot(root, "substitutions", 2),
+                                       "channel"),
+      3);
+}
+
+static void set_counts_float(cJSON *root) {
+  cJSON *counts = cJSON_GetObjectItemCaseSensitive(
+      test_slot(root, "substitutions", 0), "counts");
+  cJSON_SetNumberValue(cJSON_GetArrayItem(cJSON_GetArrayItem(counts, 0), 0),
+                       0.5);
+}
+
+static void set_wrong_inverse(cJSON *root) {
+  cJSON *inverse = cJSON_GetObjectItemCaseSensitive(
+      test_slot(root, "homopolymers", 3), "inverse");
+  cJSON_SetNumberValue(cJSON_GetArrayItem(cJSON_GetArrayItem(inverse, 0), 0),
+                       2);
+}
+
+static void set_wrong_symbols(cJSON *root) {
+  cJSON *section = cJSON_GetObjectItemCaseSensitive(root, "substitutions");
+  cJSON_SetValuestring(
+      cJSON_GetArrayItem(cJSON_GetObjectItemCaseSensitive(section, "symbols"),
+                         0),
+      "N");
+}
+
+// change the example file, then check that the parse fails with an error
+// message that has the expected text. returns 1 if the test failed
+static int test_invalid(const char *name, void (*change)(cJSON *),
+                        const char *expected) {
+  char error[MATRIX_ERROR_SIZE] = "";
+  matrix_meta_t meta = read_matrix_meta(TEST_MATRICES);
+  dude_t *dude = create_dude_params(DEFAULT_K, DEFAULT_I, meta);
+  cJSON *root = parse_matrix_file(TEST_MATRICES);
+
+  change(root);
+  int failed =
+      parse_matrix_meta(root, &meta, error) || parse_matrices(root, dude, error);
+
+  cJSON_Delete(root);
+  destroy_dude_params(dude);
+
+  if (!failed || strstr(error, expected) == NULL) {
+    fprintf(stderr, "matrices test '%s' failed: error '%s', expected '%s'\n",
+            name, error, expected);
+    return 1;
+  }
+  return 0;
+}
+
+static int check_value(const char *name, float value, float expected) {
+  if (fabsf(value - expected) > 1e-6) {
+    fprintf(stderr, "matrices test '%s' failed: %g, expected %g\n", name,
+            value, expected);
+    return 1;
+  }
+  return 0;
+}
+
+// returns the number of failed tests
+int test_matrices() {
+  int f = 0;
+  matrix_meta_t meta = read_matrix_meta(TEST_MATRICES);
+  f += check_value("slot type", meta.type, POSITION);
+  f += check_value("range", meta.range, 20);
+  f += check_value("max length", meta.max_length, 200);
+
+  dude_t *dude = create_dude_params(DEFAULT_K, DEFAULT_I, meta);
+  load_matrices(TEST_MATRICES, dude);
+
+  f += check_value("slots", dude->slots, 10);
+  // the slot 0-20 has C read as T and T read as G, the slot 100-120 A read as G
+  f += check_value("subs channel", dude->subs_channel[0][1][3], 0.125f);
+  f += check_value("subs channel", dude->subs_channel[0][1][1], 0.875f);
+  f += check_value("subs channel", dude->subs_channel[5][0][2], 0.2f);
+  f += check_value("subs inverse", dude->subs_channel_i[0][1][1],
+                   1.1428571f);
+  f += check_value("subs inverse", dude->subs_channel_i[5][0][0], 1.25f);
+  // schur[observed][x][y] = channel[y][observed] * loss[y][x]
+  f += check_value("subs schur", dude->subs_schur_product[0][3][0][1], 0.125f);
+  f += check_value("subs schur", dude->subs_schur_product[0][3][1][1], 0);
+  f += check_value("subs schur", dude->subs_schur_product[0][3][1][3], 0.875f);
+  // the example has no homopolymer errors
+  f += check_value("hom channel", dude->hom_channel[9][4][4], 1);
+  f += check_value("hom inverse", dude->hom_channel_i[9][4][4], 1);
+  f += check_value("hom schur", dude->hom_schur_product[9][4][2][4], 1);
+  f += check_value("hom schur", dude->hom_schur_product[9][4][4][4], 0);
+  f += check_value("last slot", get_index_for_matrix(500, dude), 9);
+  destroy_dude_params(dude);
+
+  f += test_invalid("format_version", set_format_version, "format_version");
+  f += test_invalid("slot_type", set_slot_type, "slot_type");
+  f += test_invalid("source.date", remove_source_date, "source.date");
+  f += test_invalid("missing slot", remove_last_slot, "homopolymers.slots");
+  f += test_invalid("slot gap", set_slot_gap, "substitutions.slots[1]");
+  f += test_invalid("3 x 4 matrix", remove_channel_row,
+                    "substitutions.slots[2].channel: must be 4 x 4");
+  f += test_invalid("counts", set_counts_float,
+                    "substitutions.slots[0].counts");
+  f += test_invalid("inverse", set_wrong_inverse,
+                    "homopolymers.slots[3]: channel x inverse");
+  f += test_invalid("symbols", set_wrong_symbols, "substitutions.symbols");
+
+  if (f == 0) {
+    printf("matrices tests passed\n");
+  }
+  return f;
+}
+
 // returns the number of failed tests
 int run_tests() {
-  int f = test_rle() + test_encoding();
+  int f = test_rle() + test_encoding() + test_matrices();
   if (f == 0) {
     printf("every test passed, nice\n");
   }

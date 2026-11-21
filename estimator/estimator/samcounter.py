@@ -63,6 +63,7 @@ class SamCounter:
         """
         self.max_read_len = max_read_len
         self.min_mapq = min_mapq
+        self.ranges_len = ranges_len
         self.ranges = list(range(0, max_read_len + ranges_len, ranges_len))
 
         self.reads = 0
