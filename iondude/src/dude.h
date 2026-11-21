@@ -1,6 +1,8 @@
 #ifndef DUDE
 #define DUDE
 
+#include "../lib/cjson/cJSON.h"
+
 #define SUBS_MATRIX_DIM 4
 #define HOM_MATRIX_DIM 10
 
@@ -10,18 +12,16 @@
 // homopolymers: 2i runs of 6 bits and the base of the centre run (2 bits)
 #define MAX_I 5
 
-// QUAL mode: one matrix per Phred score from 0 to MAX_QUAL - 1
-// bases with a higher score are not denoised
+// POSITION type: bases with a Phred score of MAX_QUAL or more are not denoised
+// QUAL type: the max_length of the matrices file gives the limit
 #define MAX_QUAL 50
 
-// flags for the matrices loaded on each slot
-#define LOADED_SUBS 1
-#define LOADED_SUBS_I 2
-#define LOADED_HOM 4
-#define LOADED_HOM_I 8
+// the matrices file format (iondude/matrices/README.md)
+#define MATRIX_FORMAT "iondude-matrices"
+#define MATRIX_FORMAT_VERSION 1
 
-// get_matrix_slot value for a matrix without a range
-#define ALL_SLOTS -2
+// size of the error messages of the matrices file checks
+#define MATRIX_ERROR_SIZE 256
 
 // Colors
 #define KNRM "\x1B[0m"
@@ -62,14 +62,12 @@ typedef struct {
   hom_matrix_type hom_loss;
   hom_schur_product *hom_schur_product;
 
-  // matrices position ranges
+  // width of each slot: read positions (POSITION) or 1 (QUAL)
   int range;
-  int range_max;
 
-  // number of matrices per type (range_max for POSITION, MAX_QUAL for QUAL)
+  // number of matrices of each kind
+  // POSITION: max read length / range, rounded up. QUAL: max quality score + 1
   int slots;
-  // LOADED_* flags for each slot
-  int *loaded;
 
   // substitutions context length
   int k;
@@ -83,6 +81,18 @@ typedef struct {
   enum denoise_mode mode;
 } dude_t;
 
+// the values of the matrices file that create_dude_params needs
+typedef struct {
+  enum denoise_type type;
+  int range;
+  int max_length;
+  // the source fields, only to print them
+  char tool[64];
+  char version[64];
+  char date[16];
+  char input[1024];
+} matrix_meta_t;
+
 // context helper struct
 typedef struct {
   // auxiliary counters
@@ -90,22 +100,26 @@ typedef struct {
   float *counters_inv;
 } context_helper_t;
 
-void load_matrices(char *estimation, dude_t *dude);
+// read and parse a JSON file, exit on an error. Free it with cJSON_Delete
+cJSON *parse_matrix_file(const char *path);
 
-void load_substitution_matrix(dude_t *dude, FILE *file, char *header,
-                              int isChannel);
+// read the metadata of a matrices file, exit on an error
+matrix_meta_t read_matrix_meta(const char *path);
 
-void load_homopolymers_matrix(dude_t *dude, FILE *file, char *header,
-                              int isChannel);
+// read the matrices of a file into dude, exit on an error
+void load_matrices(const char *path, dude_t *dude);
 
-void complete_matrices(dude_t *dude);
+// check the metadata of a parsed matrices file
+// returns 0, or 1 with the message in error (MATRIX_ERROR_SIZE)
+int parse_matrix_meta(const cJSON *root, matrix_meta_t *meta, char *error);
 
-void validate_matrices(dude_t *dude, int slot, float *channel, float *inverse,
-                       int dim);
+// check the matrices of a parsed matrices file and copy them into dude
+// returns 0, or 1 with the message in error (MATRIX_ERROR_SIZE)
+int parse_matrices(const cJSON *root, dude_t *dude, char *error);
 
-dude_t *create_dude_params(int k, int h, int read_len, int range, char *mode);
+dude_t *create_dude_params(int k, int h, matrix_meta_t meta);
 
-int get_matrix_slot(dude_t *dude, char *header);
+void destroy_dude_params(dude_t *dude);
 
 context_helper_t *create_helper(void);
 

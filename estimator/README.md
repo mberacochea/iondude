@@ -110,33 +110,13 @@ The estimator starts from a mapping with BWA (indel tolerant).
 
 The .sam file that BWA produces is processed with pysam.
 
-The output of the program will be these files:
-- substitutions_frecuency.csv
-- homopolymers_frecuency.csv
-- log.txt
+The output is one JSON file with the channel matrices, for each range of read positions:
 
-_Substitutions_frecuency.csv_
+- substitutions: 4 x 4, `[true base][observed base]`
+- homopolymers: 10 x 10, `[true length][observed length]`. The max length is 10, because the
+  probability of longer homopolymers is very low
 
- - | A       | C       | G       | T
----|---------|---------|---------|---------
- A | -       | f(A->C) | f(A->G) | f(A->T)
- C | f(C->A) | -       | f(C->G) | f(C->T)
- G | f(G->A) | f(G->C) | -       | f(G->T)
- T | f(T->A) | f(T->C) | f(T->G) | -
-
-Where f(A->C) is the frequency with which a base A changes to C.
-
-_homopolymers_frecuency.csv_
-
- - | 1       | 2       | 3
----|---------|---------|---------
- 1 | -       | f(1->2) | f(1->3)
- 2 | f(2->1  | -       | f(2->3)
- 3 | f(3->1) | f(3->2) | -
-
-Where f(1->2) is the frequency with which a homopolymer of length 1 changes to a homopolymer of length 2.
-*It is not limited to 3, the max considered is 10 because the probability of longer homopolymers is very low.*
-
-_log.txt_
-
-Extra information. To be defined.
+Each matrix has the counts, the frequencies (`channel`) and the inverted frequencies (`inverse`).
+The file also records the estimator version, the input file and the settings of the estimation.
+The format is in [iondude/matrices/README.md](../iondude/matrices/README.md).
+Use `estimator.matrices.read_matrices` to read the file in Python.

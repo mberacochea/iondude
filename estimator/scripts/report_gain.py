@@ -11,7 +11,7 @@ import matplotlib as mpl
 mpl.use('agg')
 import matplotlib.pyplot as plt
 
-from estimator.read_matrix import read_matrix_file
+from estimator.matrices import get_slot, read_matrices
 from estimator.seq import complement
 
 BASE_INDEX = {
@@ -53,6 +53,30 @@ LOSS = np.matrix([
 # max Q considered, past that value the DUDE has no possibility to correct
 # or position, if the matrices are per position
 MAX_VALUE = 30
+
+
+def load_matrices(path):
+    """
+    Read a matrices file with one slot for each quality score.
+    :param path: the JSON file
+    :return: the matrices, see estimator.matrices
+    """
+    matrices = read_matrices(path)
+    if matrices['slot_type'] != 'quality':
+        sys.exit(f"{path}: the matrices must be by quality score (slot_type quality), "
+                 f"not by {matrices['slot_type']}")
+    return matrices
+
+
+def subs_matrix(matrices, name, quality):
+    """
+    Get a substitutions matrix of a quality score.
+    :param matrices: the matrices, see estimator.matrices
+    :param name: channel or inverse
+    :param quality: the quality score
+    :return: a 4 x 4 numpy matrix
+    """
+    return np.matrix(get_slot(matrices, 'substitutions', quality)[name])
 
 
 def get_base_index(base: str) -> int:
@@ -102,7 +126,7 @@ def main():
     args = arg_parser.parse_args()
 
     # read the matrices
-    matrices = read_matrix_file(args.matrix)
+    matrices = load_matrices(args.matrix)
 
     # pA threshold
     threshold = calculate_pA_threshold(matrices)
@@ -110,9 +134,6 @@ def main():
     # data
     corrected = load_data(args.corrected, args.k)
     not_corrected = load_data(args.not_corrected, args.k)
-
-    # changes matrix
-    matrices = read_matrix_file(args.matrix)
 
     yc, xc, fc = process_data(corrected, threshold)
 
@@ -296,7 +317,7 @@ def dude_rule(correct_base, read_base, counter, quality, matrices):
         counter_arr = np.array(counter_cp)
 
         # INVERTED
-        first_op = counter_arr.dot(matrices['#SFI {}-{}'.format(quality, quality + 1)].data)
+        first_op = counter_arr.dot(subs_matrix(matrices, 'inverse', quality))
 
         # second op counters_inv * shur column product
         # the 2 depends on the observed base
@@ -308,7 +329,7 @@ def dude_rule(correct_base, read_base, counter, quality, matrices):
         base = 'A'
         t = []
         for i in range(4):
-            channel = matrices['#SF {}-{}'.format(quality, quality + 1)].data
+            channel = subs_matrix(matrices, 'channel', quality)
             pairwaise_prod = np.array(LOSS[:, i]) * np.array(channel[:, ridx])
             _m = first_op.dot(pairwaise_prod)[0, 0]
             t.append(_m)
@@ -337,7 +358,7 @@ def dude_rule_qual(correct_base, read_base, counter, quality, matrices):
     for q in range(49, 1, -1):
 
         # INVERTED
-        first_op = counter_arr.dot(matrices['#SFI {}-{}'.format(q, q + 1)].data)
+        first_op = counter_arr.dot(subs_matrix(matrices, 'inverse', q))
 
         # second op counters_inv * shur column product
         # the 2 depends on the observed base
@@ -349,7 +370,7 @@ def dude_rule_qual(correct_base, read_base, counter, quality, matrices):
         base = 'A'
         t = []
         for i in range(4):
-            pairwaise_prod = np.array(LOSS[:, i]) * np.array(matrices['#SF {}-{}'.format(q, q + 1)].data[:, ridx])
+            pairwaise_prod = np.array(LOSS[:, i]) * np.array(subs_matrix(matrices, 'channel', q)[:, ridx])
             _m = first_op.dot(pairwaise_prod)[0, 0]
             t.append(_m)
             if _m < min_value:
@@ -413,10 +434,8 @@ def calculate_pA_threshold(matrices):
 
         # pprint(mT)
 
-        str_Q = '{}-{}'.format(str(Q), str(Q + 1))
-
-        pi = Matrix(matrices['#SF ' + str_Q].data)
-        pi_1 = Matrix(matrices['#SFI ' + str_Q].data)
+        pi = Matrix(subs_matrix(matrices, 'channel', Q))
+        pi_1 = Matrix(subs_matrix(matrices, 'inverse', Q))
 
         values = []
 

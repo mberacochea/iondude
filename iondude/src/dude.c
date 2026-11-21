@@ -1,4 +1,7 @@
+#include <ctype.h>
+#include <limits.h>
 #include <math.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -8,188 +11,188 @@
 // max difference allowed on the matrices validation
 #define MATRIX_TOLERANCE 1e-3
 
-static void matrix_error(char *header, char *message) {
-  fprintf(stderr, "Invalid matrix '%.*s': %s\n", (int)strcspn(header, "\r\n"),
-          header, message);
+static const char *SUBS_SYMBOLS[SUBS_MATRIX_DIM] = {"A", "C", "G", "T"};
+
+// write the message in error, returns 1
+static int fail(char *error, const char *format, ...) {
+  va_list args;
+  va_start(args, format);
+  vsnprintf(error, MATRIX_ERROR_SIZE, format, args);
+  va_end(args);
+  return 1;
+}
+
+static void matrix_error(const char *path, const char *error) {
+  fprintf(stderr, "Invalid matrices file '%s': %s\n", path, error);
   exit(1);
 }
 
-// print the range or the quality score of a slot
-static void print_slot(FILE *file, dude_t *dude, int slot) {
-  if (dude->type == QUAL) {
-    fprintf(file, "quality %d", slot);
-  } else {
-    fprintf(file, "range %d-%d", slot * dude->range, (slot + 1) * dude->range);
-  }
-}
-
-// read the rows of a dim x dim matrix, the column names line first
-// each row starts with the row name: A\t0.98\t0.01\t...
-static void read_matrix_rows(FILE *file, float *matrix, int dim, char *header) {
-  char line[1024];
-
-  if (fgets(line, sizeof line, file) == NULL) {
-    matrix_error(header, "missing column names");
-  }
-
-  for (int i = 0; i < dim; i++) {
-    if (fgets(line, sizeof line, file) == NULL) {
-      matrix_error(header, "missing rows");
-    }
-    // skip the row name
-    char *p = strchr(line, '\t');
-    if (p == NULL) {
-      matrix_error(header, "row without values");
-    }
-    for (int j = 0; j < dim; j++) {
-      char *end;
-      matrix[i * dim + j] = strtof(p, &end);
-      if (end == p) {
-        matrix_error(header, "row with missing or invalid values");
-      }
-      p = end;
-    }
-  }
-}
-
-// get the slot for the matrix header (#SF 0-20 ...)
-// -1 if the matrix is not used, ALL_SLOTS if the header has no range
-int get_matrix_slot(dude_t *dude, char *header) {
-  int min, max;
-  if (sscanf(header, "#%*s %d-%d", &min, &max) != 2) {
-    // one matrix for all the positions or quality scores
-    return ALL_SLOTS;
-  }
-
-  if (dude->type == QUAL) {
-    // one matrix per quality score: "#SF 20-21" is the matrix for Phred 20
-    return (min >= 0 && min < MAX_QUAL) ? min : -1;
-  }
-
-  if (max - min != dude->range || min % dude->range != 0) {
-    matrix_error(header, "the range size is different from the -r value");
-  }
-
-  // ranges past the max read length are not used
-  int slot = min / dude->range;
-  return slot < dude->slots ? slot : -1;
-}
-
-void load_matrices(char *estimation, dude_t *dude) {
-  // this method load the matrices obtained with the estimator
-  // currently we have 2 sets of matrices
-  // substitutions and homopolymers changes
-  //
-  // for substitutions the estimation file contains the following lines
-  // #S   - Substitutions transition matrix counters (this is not used)
-  // #SF  - Substitutions transition matrix frequencies
-  // #SFI - Substitutions transition matrix frequencies inverted
-  //
-  // for homopolymers the patter is the same #I, #IF and #IFI
-  //
-  // each matrix has a range, the position in the read (POSITION type)
-  // or the quality score (QUAL type):
-  // #SF 0-20 - this means from 0 to 20.
-  // a matrix without a range (#SF) is used for all the positions or quality
-  // scores
-
-  // open file
-  FILE *estimation_file = fopen(estimation, "r");
-
-  if (!estimation_file) {
-    fprintf(stderr, "Could not open the Estimator matrices file '%s'.\n",
-            estimation);
+cJSON *parse_matrix_file(const char *path) {
+  FILE *file = fopen(path, "rb");
+  if (!file) {
+    fprintf(stderr, "Could not open the matrices file '%s'.\n", path);
     exit(1);
   }
 
-  char line[1024];
-
-  printf("Loading matrices...\n");
-
-  // headers (##) and the counters (#S, #I) are not used
-  while (fgets(line, sizeof line, estimation_file) != NULL) {
-    if (strncmp(line, "#SF", 3) == 0) {
-      load_substitution_matrix(dude, estimation_file, line,
-                               strncmp(line, "#SFI", 4) != 0);
-    } else if (strncmp(line, "#IF", 3) == 0) {
-      load_homopolymers_matrix(dude, estimation_file, line,
-                               strncmp(line, "#IFI", 4) != 0);
-    }
-  }
-
-  fclose(estimation_file);
-
-  printf("Finished loading matrices\n");
-
-  complete_matrices(dude);
-
-  printf("Validating...\n");
-
-  for (int z = 0; z < dude->slots; z++) {
-    validate_matrices(dude, z, &dude->subs_channel[z][0][0],
-                      &dude->subs_channel_i[z][0][0], SUBS_MATRIX_DIM);
-    validate_matrices(dude, z, &dude->hom_channel[z][0][0],
-                      &dude->hom_channel_i[z][0][0], HOM_MATRIX_DIM);
-  }
-
-  printf("Validation completed\n");
-}
-
-// find the closest slot with the matrices loaded from the file
-static int nearest_loaded_slot(dude_t *dude, int slot, int flags) {
-  for (int d = 1; d < dude->slots; d++) {
-    if (slot - d >= 0 && (dude->loaded[slot - d] & flags) == flags)
-      return slot - d;
-    if (slot + d < dude->slots && (dude->loaded[slot + d] & flags) == flags)
-      return slot + d;
-  }
-  return -1;
-}
-
-void complete_matrices(dude_t *dude) {
-  // every range needs a matrix in the file
-  // quality scores without a matrix use the matrix of the closest quality score
-  for (int z = 0; z < dude->slots; z++) {
-    int subs = LOADED_SUBS | LOADED_SUBS_I;
-    int hom = LOADED_HOM | LOADED_HOM_I;
-
-    if ((dude->loaded[z] & subs) != subs) {
-      int from = (dude->type == QUAL) ? nearest_loaded_slot(dude, z, subs) : -1;
-      if (from < 0) {
-        fprintf(stderr, "Missing substitutions matrices (#SF and #SFI) for ");
-        print_slot(stderr, dude, z);
-        fprintf(stderr, ".\n");
-        exit(1);
+  char *text = NULL;
+  size_t size = 0, used = 0, n;
+  do {
+    if (used + 4096 + 1 > size) {
+      size = 2 * size + 4096 + 1;
+      text = realloc(text, size);
+      if (text == NULL) {
+        error_exit();
       }
-      memcpy(dude->subs_channel[z], dude->subs_channel[from],
-             sizeof(subs_matrix_type));
-      memcpy(dude->subs_channel_i[z], dude->subs_channel_i[from],
-             sizeof(subs_matrix_type));
-      memcpy(dude->subs_schur_product[z], dude->subs_schur_product[from],
-             sizeof(subs_schur_product));
     }
+    n = fread(text + used, 1, size - used - 1, file);
+    used += n;
+  } while (n > 0);
+  text[used] = '\0';
+  fclose(file);
 
-    if ((dude->loaded[z] & hom) != hom) {
-      int from = (dude->type == QUAL) ? nearest_loaded_slot(dude, z, hom) : -1;
-      if (from < 0) {
-        fprintf(stderr, "Missing homopolymers matrices (#IF and #IFI) for ");
-        print_slot(stderr, dude, z);
-        fprintf(stderr, ".\n");
-        exit(1);
-      }
-      memcpy(dude->hom_channel[z], dude->hom_channel[from],
-             sizeof(hom_matrix_type));
-      memcpy(dude->hom_channel_i[z], dude->hom_channel_i[from],
-             sizeof(hom_matrix_type));
-      memcpy(dude->hom_schur_product[z], dude->hom_schur_product[from],
-             sizeof(hom_schur_product));
-    }
+  cJSON *root = cJSON_Parse(text);
+  free(text);
+  if (root == NULL) {
+    matrix_error(path, "not a valid JSON file");
   }
+  return root;
 }
 
-void validate_matrices(dude_t *dude, int slot, float *channel, float *inverse,
-                       int dim) {
-  // the channel rows must sum to 1 and channel x inverse must be the identity
+// an integer value of the field, as a JSON number
+static int get_int(const cJSON *object, const char *name, int *value) {
+  const cJSON *item = cJSON_GetObjectItemCaseSensitive(object, name);
+  if (!cJSON_IsNumber(item) || item->valuedouble < INT_MIN ||
+      item->valuedouble > INT_MAX ||
+      item->valuedouble != (int)item->valuedouble) {
+    return 0;
+  }
+  *value = (int)item->valuedouble;
+  return 1;
+}
+
+// copy a string field to out (size bytes)
+static int get_string(const cJSON *object, const char *name, char *out,
+                      size_t size) {
+  const char *value =
+      cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(object, name));
+  if (value == NULL) {
+    return 0;
+  }
+  snprintf(out, size, "%s", value);
+  return 1;
+}
+
+// YYYY-MM-DD
+static int is_iso_date(const char *date) {
+  if (strlen(date) != 10 || date[4] != '-' || date[7] != '-') {
+    return 0;
+  }
+  for (int i = 0; i < 10; i++) {
+    if (i != 4 && i != 7 && !isdigit((unsigned char)date[i])) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+int parse_matrix_meta(const cJSON *root, matrix_meta_t *meta, char *error) {
+  memset(meta, 0, sizeof *meta);
+
+  if (!cJSON_IsObject(root)) {
+    return fail(error, "file: must be a JSON object");
+  }
+
+  const char *format =
+      cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(root, "format"));
+  if (format == NULL || strcmp(format, MATRIX_FORMAT) != 0) {
+    return fail(error, "format: must be \"%s\"", MATRIX_FORMAT);
+  }
+
+  int version;
+  if (!get_int(root, "format_version", &version) ||
+      version != MATRIX_FORMAT_VERSION) {
+    return fail(error, "format_version: must be %d", MATRIX_FORMAT_VERSION);
+  }
+
+  const cJSON *source = cJSON_GetObjectItemCaseSensitive(root, "source");
+  if (!cJSON_IsObject(source)) {
+    return fail(error, "source: missing");
+  }
+  if (!get_string(source, "tool", meta->tool, sizeof meta->tool)) {
+    return fail(error, "source.tool: missing");
+  }
+  if (!get_string(source, "version", meta->version, sizeof meta->version)) {
+    return fail(error, "source.version: missing");
+  }
+  if (!get_string(source, "date", meta->date, sizeof meta->date)) {
+    return fail(error, "source.date: missing");
+  }
+  if (!is_iso_date(meta->date)) {
+    return fail(error, "source.date: must be an ISO 8601 date (YYYY-MM-DD)");
+  }
+  if (!get_string(source, "input", meta->input, sizeof meta->input)) {
+    return fail(error, "source.input: missing");
+  }
+
+  if (!cJSON_IsObject(cJSON_GetObjectItemCaseSensitive(root, "estimation"))) {
+    return fail(error, "estimation: missing");
+  }
+
+  const char *slot_type =
+      cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(root, "slot_type"));
+  if (slot_type != NULL && strcmp(slot_type, "position") == 0) {
+    meta->type = POSITION;
+  } else if (slot_type != NULL && strcmp(slot_type, "quality") == 0) {
+    meta->type = QUAL;
+  } else {
+    return fail(error, "slot_type: must be one of position, quality");
+  }
+
+  if (!get_int(root, "range", &meta->range) || meta->range < 1) {
+    return fail(error, "range: must be an integer greater than 0");
+  }
+  if (meta->type == QUAL && meta->range != 1) {
+    return fail(error, "range: must be 1 for slot_type quality");
+  }
+  if (!get_int(root, "max_length", &meta->max_length) ||
+      meta->max_length < 1) {
+    return fail(error, "max_length: must be an integer greater than 0");
+  }
+
+  return 0;
+}
+
+// copy a dim x dim JSON matrix to out (row-major), or check that it has only
+// integers if out is NULL
+static int read_matrix(const cJSON *json, float *out, int dim,
+                       const char *field, char *error) {
+  if (!cJSON_IsArray(json) || cJSON_GetArraySize(json) != dim) {
+    return fail(error, "%s: must be %d x %d", field, dim, dim);
+  }
+  for (int i = 0; i < dim; i++) {
+    const cJSON *row = cJSON_GetArrayItem(json, i);
+    if (!cJSON_IsArray(row) || cJSON_GetArraySize(row) != dim) {
+      return fail(error, "%s: must be %d x %d", field, dim, dim);
+    }
+    for (int j = 0; j < dim; j++) {
+      const cJSON *value = cJSON_GetArrayItem(row, j);
+      if (!cJSON_IsNumber(value)) {
+        return fail(error, "%s: must have only numbers", field);
+      }
+      if (out == NULL && value->valuedouble != floor(value->valuedouble)) {
+        return fail(error, "%s: must have only integers", field);
+      }
+      if (out != NULL) {
+        out[i * dim + j] = (float)value->valuedouble;
+      }
+    }
+  }
+  return 0;
+}
+
+// the channel rows must sum to 1 and channel x inverse must be the identity
+static int validate_matrices(const float *channel, const float *inverse,
+                             int dim, const char *field, char *error) {
   for (int i = 0; i < dim; i++) {
     float sum = 0;
     for (int j = 0; j < dim; j++) {
@@ -200,95 +203,144 @@ void validate_matrices(dude_t *dude, int slot, float *channel, float *inverse,
         product += channel[i * dim + n] * inverse[n * dim + j];
       }
       if (fabsf(product - (i == j)) > MATRIX_TOLERANCE) {
-        fprintf(stderr, "The inverted matrix (%dx%d) for ", dim, dim);
-        print_slot(stderr, dude, slot);
-        fprintf(stderr, " is not the inverse of the matrix.\n");
-        exit(1);
+        return fail(error, "%s: channel x inverse is not the identity matrix",
+                    field);
       }
     }
     if (fabsf(sum - 1) > MATRIX_TOLERANCE) {
-      fprintf(stderr, "The matrix (%dx%d) for ", dim, dim);
-      print_slot(stderr, dude, slot);
-      fprintf(stderr, ": row %d doesn't sum to 1.\n", i);
-      exit(1);
+      return fail(error, "%s: channel row %d does not sum to 1", field, i);
     }
   }
+  return 0;
 }
 
-void load_substitution_matrix(dude_t *dude, FILE *file, char *header,
-                              int isChannel) {
-
-  subs_matrix_type matrix;
-  read_matrix_rows(file, &matrix[0][0], SUBS_MATRIX_DIM, header);
-
-  int first = get_matrix_slot(dude, header), last = first;
-  if (first == ALL_SLOTS) {
-    first = 0;
-    last = dude->slots - 1;
-  } else if (first < 0) {
-    return;
-  }
-
-  for (int position = first; position <= last; position++) {
-    if (isChannel) {
-      memcpy(dude->subs_channel[position], matrix, sizeof matrix);
-      dude->loaded[position] |= LOADED_SUBS;
-    } else {
-      memcpy(dude->subs_channel_i[position], matrix, sizeof matrix);
-      dude->loaded[position] |= LOADED_SUBS_I;
-      continue;
-    }
-
-    // Cache the Schur product (pairwise product)
-    // for each possible base in X
-    for (int observed_symb = 0; observed_symb < SUBS_MATRIX_DIM;
-         observed_symb++) {
-      // build the columns for that possibility
-      for (int x = 0; x < SUBS_MATRIX_DIM; x++) {
-        for (int y = 0; y < SUBS_MATRIX_DIM; y++) {
-          dude->subs_schur_product[position][observed_symb][x][y] =
-              dude->subs_channel[position][y][observed_symb] *
-              dude->subs_loss[y][x];
-        }
+// cache the Schur product of each channel column and each loss column:
+// schur[observed][x][y] = channel[y][observed] * loss[y][x]
+static void set_schur_product(const float *channel, const float *loss,
+                              float *schur, int dim) {
+  for (int observed = 0; observed < dim; observed++) {
+    for (int x = 0; x < dim; x++) {
+      for (int y = 0; y < dim; y++) {
+        schur[(observed * dim + x) * dim + y] =
+            channel[y * dim + observed] * loss[y * dim + x];
       }
     }
   }
 }
 
-void load_homopolymers_matrix(dude_t *dude, FILE *file, char *header,
-                              int isChannel) {
-
-  hom_matrix_type matrix;
-  read_matrix_rows(file, &matrix[0][0], HOM_MATRIX_DIM, header);
-
-  int first = get_matrix_slot(dude, header), last = first;
-  if (first == ALL_SLOTS) {
-    first = 0;
-    last = dude->slots - 1;
-  } else if (first < 0) {
-    return;
+// check one section (substitutions or homopolymers) and copy its slots
+// symbols: the symbol names, NULL for the numbers 1 to dim
+// channel, inverse and schur: the arrays of dude, slots x dim x dim (x dim)
+static int parse_section(const cJSON *root, const char *kind, int dim,
+                         const char **symbols, dude_t *dude, float *channel,
+                         float *inverse, float *schur, const float *loss,
+                         char *error) {
+  const cJSON *section = cJSON_GetObjectItemCaseSensitive(root, kind);
+  if (!cJSON_IsObject(section)) {
+    return fail(error, "%s: missing", kind);
   }
 
-  for (int position = first; position <= last; position++) {
-    if (isChannel) {
-      memcpy(dude->hom_channel[position], matrix, sizeof matrix);
-      dude->loaded[position] |= LOADED_HOM;
-    } else {
-      memcpy(dude->hom_channel_i[position], matrix, sizeof matrix);
-      dude->loaded[position] |= LOADED_HOM_I;
-      continue;
+  const cJSON *names = cJSON_GetObjectItemCaseSensitive(section, "symbols");
+  int symbols_ok = cJSON_IsArray(names) && cJSON_GetArraySize(names) == dim;
+  for (int i = 0; symbols_ok && i < dim; i++) {
+    const cJSON *name = cJSON_GetArrayItem(names, i);
+    symbols_ok = symbols ? cJSON_IsString(name) &&
+                               strcmp(name->valuestring, symbols[i]) == 0
+                         : cJSON_IsNumber(name) && name->valuedouble == i + 1;
+  }
+  if (!symbols_ok) {
+    return fail(error, "%s.symbols: must be %s", kind,
+                symbols ? "[\"A\", \"C\", \"G\", \"T\"]"
+                        : "[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]");
+  }
+
+  const cJSON *slots = cJSON_GetObjectItemCaseSensitive(section, "slots");
+  if (!cJSON_IsArray(slots) || cJSON_GetArraySize(slots) != dude->slots) {
+    return fail(error, "%s.slots: must have %d slots", kind, dude->slots);
+  }
+
+  int size = dim * dim;
+  for (int z = 0; z < dude->slots; z++) {
+    const cJSON *slot = cJSON_GetArrayItem(slots, z);
+    char field[64];
+    int min, max;
+
+    snprintf(field, sizeof field, "%s.slots[%d]", kind, z);
+    if (!cJSON_IsObject(slot)) {
+      return fail(error, "%s: must be an object", field);
+    }
+    if (!get_int(slot, "min", &min) || !get_int(slot, "max", &max) ||
+        min != z * dude->range || max != (z + 1) * dude->range) {
+      return fail(error,
+                  "%s: min and max must be %d and %d, no gaps and no overlaps",
+                  field, z * dude->range, (z + 1) * dude->range);
     }
 
-    // Cache the Schur product
-    for (int f = 0; f < HOM_MATRIX_DIM; f++) {
-      for (int j = 0; j < HOM_MATRIX_DIM; j++) {
-        for (int n = 0; n < HOM_MATRIX_DIM; n++) {
-          dude->hom_schur_product[position][f][j][n] =
-              dude->hom_channel[position][n][f] * dude->hom_loss[n][j];
-        }
-      }
+    char matrix_field[80];
+    snprintf(matrix_field, sizeof matrix_field, "%s.counts", field);
+    if (read_matrix(cJSON_GetObjectItemCaseSensitive(slot, "counts"), NULL,
+                    dim, matrix_field, error)) {
+      return 1;
     }
+    snprintf(matrix_field, sizeof matrix_field, "%s.channel", field);
+    if (read_matrix(cJSON_GetObjectItemCaseSensitive(slot, "channel"),
+                    channel + z * size, dim, matrix_field, error)) {
+      return 1;
+    }
+    snprintf(matrix_field, sizeof matrix_field, "%s.inverse", field);
+    if (read_matrix(cJSON_GetObjectItemCaseSensitive(slot, "inverse"),
+                    inverse + z * size, dim, matrix_field, error)) {
+      return 1;
+    }
+    if (validate_matrices(channel + z * size, inverse + z * size, dim, field,
+                          error)) {
+      return 1;
+    }
+
+    set_schur_product(channel + z * size, loss, schur + z * size * dim, dim);
   }
+  return 0;
+}
+
+int parse_matrices(const cJSON *root, dude_t *dude, char *error) {
+  return parse_section(root, "substitutions", SUBS_MATRIX_DIM, SUBS_SYMBOLS,
+                       dude, &dude->subs_channel[0][0][0],
+                       &dude->subs_channel_i[0][0][0],
+                       &dude->subs_schur_product[0][0][0][0],
+                       &dude->subs_loss[0][0], error) ||
+         parse_section(root, "homopolymers", HOM_MATRIX_DIM, NULL, dude,
+                       &dude->hom_channel[0][0][0],
+                       &dude->hom_channel_i[0][0][0],
+                       &dude->hom_schur_product[0][0][0][0],
+                       &dude->hom_loss[0][0], error);
+}
+
+matrix_meta_t read_matrix_meta(const char *path) {
+  matrix_meta_t meta;
+  char error[MATRIX_ERROR_SIZE];
+
+  cJSON *root = parse_matrix_file(path);
+  int failed = parse_matrix_meta(root, &meta, error);
+  cJSON_Delete(root);
+  if (failed) {
+    matrix_error(path, error);
+  }
+  return meta;
+}
+
+void load_matrices(const char *path, dude_t *dude) {
+  char error[MATRIX_ERROR_SIZE];
+
+  printf("Loading and validating the matrices...\n");
+
+  cJSON *root = parse_matrix_file(path);
+  int failed = parse_matrices(root, dude, error);
+  cJSON_Delete(root);
+  if (failed) {
+    matrix_error(path, error);
+  }
+
+  printf("Validation completed\n");
 }
 
 // create a new context helper
@@ -301,8 +353,8 @@ context_helper_t *create_helper(void) {
   return helper;
 }
 
-// Create a new DUDE params struct
-dude_t *create_dude_params(int k, int h, int read_len, int range, char *type) {
+// Create a new DUDE params struct, with the slots of the matrices file
+dude_t *create_dude_params(int k, int h, matrix_meta_t meta) {
 
   dude_t *dude = (dude_t *)malloc(sizeof(dude_t));
 
@@ -316,16 +368,11 @@ dude_t *create_dude_params(int k, int h, int read_len, int range, char *type) {
   // indels context length
   dude->h = h;
 
-  // mode
-  dude->type = POSITION;
-  if (strncmp(type, "qual", 5) == 0) {
-    dude->type = QUAL;
-  }
+  dude->type = meta.type;
 
-  // The range doesn't matter for QUAL denoise type
-  // the last range can be shorter, ie. read_len 150 and range 20 -> 8 ranges
-  dude->range = range;
-  dude->range_max = (read_len + range - 1) / range;
+  // the last slot can go past max_length, ie. 150 and range 20 -> 8 slots
+  dude->range = meta.range;
+  dude->slots = (meta.max_length + meta.range - 1) / meta.range;
 
   // ======================================
   //   Substitutions Hamming loss function
@@ -345,10 +392,7 @@ dude_t *create_dude_params(int k, int h, int read_len, int range, char *type) {
     }
   }
 
-  dude->slots = (dude->type == QUAL) ? MAX_QUAL : dude->range_max;
   int size = dude->slots;
-
-  dude->loaded = calloc(size, sizeof(int));
 
   dude->subs_channel = calloc(size, sizeof(subs_matrix_type));
   dude->subs_channel_i = calloc(size, sizeof(subs_matrix_type));
@@ -358,7 +402,7 @@ dude_t *create_dude_params(int k, int h, int read_len, int range, char *type) {
   dude->hom_channel_i = calloc(size, sizeof(hom_matrix_type));
   dude->hom_schur_product = calloc(size, sizeof(hom_schur_product));
 
-  if (!dude->loaded || !dude->subs_channel || !dude->subs_channel_i ||
+  if (!dude->subs_channel || !dude->subs_channel_i ||
       !dude->subs_schur_product || !dude->hom_channel || !dude->hom_channel_i ||
       !dude->hom_schur_product) {
     error_exit();
@@ -367,11 +411,23 @@ dude_t *create_dude_params(int k, int h, int read_len, int range, char *type) {
   return dude;
 }
 
+void destroy_dude_params(dude_t *dude) {
+  if (dude == NULL)
+    return;
+  free(dude->subs_channel);
+  free(dude->subs_channel_i);
+  free(dude->subs_schur_product);
+  free(dude->hom_channel);
+  free(dude->hom_channel_i);
+  free(dude->hom_schur_product);
+  free(dude);
+}
+
 int get_index_for_matrix(int position_in_read, dude_t *dude) {
   int p = position_in_read / dude->range;
-  if (p >= dude->range_max) {
+  if (p >= dude->slots) {
     // positions past the max read length use the last range
-    return dude->range_max - 1;
+    return dude->slots - 1;
   } else {
     return p;
   }

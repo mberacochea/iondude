@@ -1,12 +1,12 @@
 CC     ?= cc
 # Optimisation level. For a debug build: make clean && make OPT="-O0 -g"
 OPT    ?= -O2
-CFLAGS += -std=c99 -Wall $(OPT)
+CFLAGS += -std=c99 -Wall $(OPT) -Ilib/cjson
 LDLIBS += -lz -lm
 
 BUILD = build
-SRC   = src/dude.c src/iondude.c src/seq.c
-HDR   = src/dude.h src/seq.h lib/klib/kseq.h lib/klib/khash.h
+SRC   = src/dude.c src/iondude.c src/seq.c lib/cjson/cJSON.c
+HDR   = src/dude.h src/seq.h lib/klib/kseq.h lib/klib/khash.h lib/cjson/cJSON.h
 
 GIT_BRANCH      := $(shell git symbolic-ref --short HEAD 2>/dev/null || echo unknown)
 GIT_COMMIT_HASH := $(shell git describe --always --dirty 2>/dev/null || echo "none yet")
