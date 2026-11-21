@@ -3,33 +3,35 @@ from itertools import pairwise
 
 import numpy as np
 
-from estimator.samcounter import MAX_HOMOPOLYMER
-
-BASES = ["A", "C", "G", "T"]
-HOMOPOLYMER_LENGTHS = list(range(1, MAX_HOMOPOLYMER + 1))
+from estimator.matrices import FORMAT, FORMAT_VERSION, SYMBOLS, write_matrices
 
 
-def frequencies(errors, correct):
+def frequencies(counts):
     """
     Get the channel matrix: the frequency of each true symbol (row) read as each symbol (column).
 
     The total of a row is the number of times the true symbol was seen: the correct calls plus
     the errors. A row without observations has no error data, so it is the identity row.
-    :param errors: (n, n) counts, [true][observed], the diagonal is 0
-    :param correct: (n,) counts of the correct calls
+    :param counts: (n, n) counts, [true][observed], the correct calls on the diagonal
     :return: the (n, n) channel matrix and its inverse
     """
-    counts = errors + np.diag(correct)
     totals = counts.sum(axis=1)
-    freq = np.eye(len(correct))
+    freq = np.eye(len(counts))
     observed = totals > 0
     freq[observed] = counts[observed] / totals[observed, None]
     return freq, np.linalg.inv(freq)
 
 
 class Reporter:
-    def __init__(self, sam_counter):
+    def __init__(self, sam_counter, source, estimation):
+        """
+        :param sam_counter: a SamCounter that has counted the reads
+        :param source: the source fields of the file: tool, version, date and input
+        :param estimation: the settings of the estimation, by name
+        """
         self.sam_counter = sam_counter
+        self.source = source
+        self.estimation = estimation
 
     def save(self, out=None):
         """
@@ -44,56 +46,40 @@ class Reporter:
 
     def write(self, file):
         """
-        Write the substitutions and the homopolymers matrices
+        Write the substitutions and the homopolymers matrices as JSON
         :param file: an open file
+        """
+        write_matrices(file, self.matrices())
+
+    def matrices(self):
+        """
+        Get the matrices in the in-memory form of estimator.matrices
+        :return: a dict with the same shape as the JSON file
         """
         counter = self.sam_counter
+        return {
+            "format": FORMAT,
+            "format_version": FORMAT_VERSION,
+            "source": self.source,
+            "estimation": self.estimation,
+            "slot_type": "position",
+            "range": counter.ranges_len,
+            "max_length": counter.max_read_len,
+            "substitutions": self.section("substitutions", counter.subs_per_base, counter.correct_bases),
+            "homopolymers": self.section("homopolymers", counter.indels_per_pos, counter.correct_homopolymers),
+        }
 
-        print("##Substitutions", file=file)
-        self.write_matrices(file, "S", "Substitutions", BASES,
-                            counter.subs_per_base, counter.correct_bases)
-
-        print("##Homopolymers", file=file)
-        self.write_matrices(file, "I", "Indels", HOMOPOLYMER_LENGTHS,
-                            counter.indels_per_pos, counter.correct_homopolymers)
-
-    def write_matrices(self, file, code, label, names, errors_per_pos, correct_per_pos):
+    def section(self, kind, errors_per_pos, correct_per_pos):
         """
-        Write the counters, the frequencies and the inverted frequencies for all the positions,
-        then for each range of positions.
-        :param file: an open file
-        :param code: matrix code in the header, S or I
-        :param label: matrix name in the header
-        :param names: row and column names
+        Get the counts, the channel matrix and its inverse for each range of positions.
+        :param kind: substitutions or homopolymers
         :param errors_per_pos: (positions, n, n) error counts
         :param correct_per_pos: (positions, n) correct counts
+        :return: the section, a dict with the symbols and the slots
         """
-        ranges = self.sam_counter.ranges
-        blocks = [("", slice(None))]
-        blocks += [(f"{low}-{high} ", slice(low, high)) for low, high in pairwise(ranges)]
-
-        for range_name, positions in blocks:
-            errors = errors_per_pos[positions].sum(axis=0)
-            correct = correct_per_pos[positions].sum(axis=0)
-            freq, freq_inverted = frequencies(errors, correct)
-
-            print(f"#{code} {range_name}{label} counters", file=file)
-            self.write_matrix(file, names, errors)
-
-            print(f"#{code}F {range_name}{label} frequencies", file=file)
-            self.write_matrix(file, names, freq)
-
-            print(f"#{code}FI {range_name}{label} frequencies inverted", file=file)
-            self.write_matrix(file, names, freq_inverted)
-
-    @staticmethod
-    def write_matrix(file, names, matrix):
-        """
-        Write a matrix, tab separated, with the row and column names.
-        :param file: Output file
-        :param names: Row and column names
-        :param matrix: 2D numpy array
-        """
-        print("\t".join(["-"] + [str(name) for name in names]), file=file)
-        for name, row in zip(names, matrix, strict=True):
-            print("\t".join([str(name)] + [str(value) for value in row]), file=file)
+        slots = []
+        for low, high in pairwise(self.sam_counter.ranges):
+            counts = errors_per_pos[low:high].sum(axis=0) + np.diag(correct_per_pos[low:high].sum(axis=0))
+            channel, inverse = frequencies(counts)
+            slots.append({"min": low, "max": high, "counts": counts, "channel": channel, "inverse": inverse})
+        return {"symbols": SYMBOLS[kind], "slots": slots}
